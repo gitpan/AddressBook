@@ -1,0 +1,51 @@
+Revision history for Perl extension AddressBook.
+
+0.11  12/05/2000
+
+    - "databases" section of config file now contains tags named for each
+      backend.
+
+0.10  12/04/2000
+
+    * First publically available release
+    - Documentation added
+    - Constructor syntax enhancements
+	
+0.05  11/27/2000	
+
+    - Backend-specfic meta-attributes in config file
+	
+0.04  11/27/2000
+
+    - PDB backend now uses pilot-link libraries and supports syncing
+	
+0.03  11/13/2000
+
+    - sync function added
+	
+0.02  11/2/2000
+
+    - XML config file.  Among other things, this allows _all_ configuration to be
+      done at runtime.  Multiple configurations can be used at the same time (for
+      things like syncing one LDAP server with another).
+    - dn construction is now configurable
+    - support for "calculated" fields.  As in ldap-abook wherein "cn=givenname .
+      lastname", etc...
+    - Added LDIF backend
+    - Added more backend functions.  The backends now support the following:
+      - LDAP: add, delete, update, search
+      - LDIF: add, read, reset, truncate
+      - Text: add
+      - DBI: search, add, truncate
+      - HTML: show 
+    - Internally, I moved all knowledge of the field name translations to the Entry
+      object.  Instead of backend having to do forward and reverse field name
+      lookups in the configuration hashes, now they can request an attribute hash
+      with the appropriate key names from the Entry object.  In other words,
+      $entry->get(db=>LDAP) returns a hash whose keys are those defined for the
+      LDAP backend.  This ended up making backend functions much easier to write &
+      debug.
+
+0.01  8/13/2000
+   - original version; created by h2xs 1.19
+
