@@ -13,6 +13,8 @@ AddressBook::DB::DBI - Backend for AddressBook to use in databases
 
 =head1 DESCRIPTION
 
+The DBI perl library module is required in order to use this package.
+
 AddressBook::DB::DBI supports both sequential and random access backend database 
 methods.
 
@@ -48,7 +50,7 @@ use File::Basename;
 use Date::Manip;
 use vars qw($VERSION @ISA);
 
-$VERSION = '0.10';
+$VERSION = '0.13';
 
 @ISA = qw(AddressBook);
 
@@ -92,8 +94,8 @@ sub new {
     $self->{$_} = $args{$_};
   }
   if(defined $self->{dsn}) {
-    ($self->{driverName},$self->{dsn}) = split (':',$self->{dsn});
-    my $dbh = DBI->connect("dbi:" . $self->{driverName} . ":" . $self->{dsn}) 
+    ($self->{dbi_driver},$self->{dsn}) = split (':',$self->{dsn});
+    my $dbh = DBI->connect("dbi:" . $self->{dbi_driver} . ":" . $self->{dsn}) 
 	|| croak $self->{dbh}->errstr;
     $self->{dbh} = $dbh;
   }
@@ -107,7 +109,7 @@ sub new {
 sub _verify_table {
   my $self = shift;
   my $class = ref $self || croak "Not a method call";
-  if ($self->{driverName} eq "CSV") {
+  if ($self->{dbi_driver} eq "CSV") {
     my @tables = $self->{dbh}->func('list_tables');
     my $found = 0;
     foreach (@tables) {
@@ -140,7 +142,7 @@ sub search {
     my $entry = AddressBook::Entry->new(attr=>{%{$arg{filter}}},
 					config => $self->{config},
 					);
-    $entry = $entry->get(db=>'DBI',values_only=>'1');
+    $entry = $entry->get(db=>$self->{db_name},values_only=>'1');
     foreach (keys %{$entry}) {
       push @filter,"$_ = ".$self->{dbh}->quote(join ($self->{intra_attr_sep_char},@{$entry->{$_}}));
     }
@@ -161,7 +163,7 @@ sub read {
     $self->reset;
   }
   if(defined ($_ = $self->{so}->fetchrow_hashref)) {
-    my $entry = AddressBook::Entry->new(db => 'DBI',
+    my $entry = AddressBook::Entry->new(db => $self->{db_name},
 					attr=>{%$_},
 					config=>$self->{config});
     $entry->{timestamp} = $self->_get_timestamp;
@@ -173,7 +175,7 @@ sub read {
 sub _get_timestamp {
   my $self = shift;
   my $class = ref $self || croak "Not a method call";
-  if ($self->{driverName} =~ /^CSV/) {
+  if ($self->{dbi_driver} =~ /^CSV/) {
     my @stat = stat($self->{dbh}->{f_dir} . "/" . $self->{table});
     return ParseDateString("epoch $stat[9]");
   } else {
@@ -200,7 +202,7 @@ sub update {
   my $filter_entry = AddressBook::Entry->new(attr=>{%{$args{filter}}},
 					     config => $self->{config},
 					     );
-  my $filter_attrs = $filter_entry->get(db=>'DBI',values_only=>'1');
+  my $filter_attrs = $filter_entry->get(db=>$self->{db_name},values_only=>'1');
   my @filter;
   foreach (keys %{$filter_attrs}) {
     push @filter,"$_ = ".$self->{dbh}->quote(join ($self->{intra_attr_sep_char},@{$filter_attrs->{$_}}));
@@ -208,7 +210,7 @@ sub update {
   my $filter = join " AND ",@filter;
   my $entry = $args{entry};
   $entry->calculate;
-  my $attr = $entry->get(db=>'DBI',values_only=>'1');
+  my $attr = $entry->get(db=>$self->{db_name},values_only=>'1');
   my @updates;
   foreach (keys %{$attr}) {
     push @updates,"$_ = ".$self->{dbh}->quote(join ($self->{intra_attr_sep_char},@{$attr->{$_}}));
@@ -226,7 +228,7 @@ sub add {
   my ($entry) = @_;
   my ($attr);
   $entry->calculate;
-  $attr = $entry->get(db=>'DBI',values_only=>'1');
+  $attr = $entry->get(db=>$self->{db_name},values_only=>'1');
   foreach (keys %{$attr}) {
     $attr->{$_} = join $self->{intra_attr_sep_char},@{$attr->{$_}};
     $attr->{$_} = $self->{dbh}->quote($attr->{$_});

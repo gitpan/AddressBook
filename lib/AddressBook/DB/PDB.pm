@@ -8,10 +8,14 @@ AddressBook::DB::PDB - Backend for AddressBook to use PDB (PalmOS) Databases.
 
   use AddressBook;
   $a = AddressBook->new(source => "PDB",port=>"/dev/pilot");
-
   $b = AddressBook->new(source => "PDB",pdb=>$pdb);
+  $c = AddressBook->new(source => "PDB",dlp=>$dlp);
 
 =head1 DESCRIPTION
+
+The PDA::Pilot library module is required in order to use this package.
+PDA::Pilot is available as part of the pilot-link distribution, which is
+available at http://www.gnu-designs.com/pilot-link
 
 AddressBook::DB::PDB supports sequential backend database methods.
 AddressBook::DB::PDB behavior can be modified using the following options:
@@ -43,6 +47,10 @@ for all records in all other categories, you could use the following:
                    ? 'Work,Home,E-Mail' 
                    : 'Home,Work,E-Mail'"
 
+=item intra_attr_sep_char
+
+The character to use when joining multi-valued fields.  The default is ' & '.
+
 =back
 
 Any of these options can be specified in the constructor, or in the configuration file.
@@ -56,11 +64,15 @@ use Carp;
 use Date::Manip;
 use vars qw($VERSION @ISA);
 
-$VERSION = '0.10';
+$VERSION = '0.13';
 
 @ISA = qw(AddressBook);
 
 =head2 new
+
+  $a = AddressBook->new(source => "PDB");
+  $a = AddressBook->new(source => "PDB",
+                        port => "/dev/pilot");
 
 If a "pdb" parameter is supplied, it will be used as a reference to an already
 created PDA::Pilot::DLP::DBPtr object.  Otherwise, if a "port" is supplied,
@@ -76,14 +88,24 @@ sub new {
   foreach (keys %args) {
     $self->{$_} = $args{$_};
   }
-  if ($self->{port}) {
-    my $socket = PDA::Pilot::openPort($self->{port});
-    print "Now press the HotSync button\n";
-    my $dlp = PDA::Pilot::accept($socket);
-    $self->{pdb} = $dlp->open("AddressDB");
-    $self->_read_appinfo;
-  } elsif ($self->{file}) {
-    croak("PDB file backends are not currently implemented");  
+  if (! $self->{pdb}) {
+    if (! $self->{dlp}) {
+      my $socket = PDA::Pilot::openPort($self->{port});
+      print "Now press the HotSync button\n";
+      $self->{dlp} = PDA::Pilot::accept($socket);
+    } 
+    $self->{pdb} = $self->{dlp}->open("AddressDB");
+  }
+  if (! $self->{pdb}) {
+    croak "Error: No port, dlp, or pdb specified";
+  }
+  $self->reset;
+  unless (defined $self->{intra_attr_sep_char}) {
+    $self->{intra_attr_sep_char} = ' & ';
+  }
+  return $self;
+
+#   croak("PDB file backends are not currently implemented");  
 #   if (-e $self->{file}) {
 #     $self->{pdb} = PDA::Pilot::File::open($self->{file};
 #   } else {
@@ -93,11 +115,7 @@ sub new {
 #      $info->{type}="DATA";
 #      $self->{pdb} = PDA::Pilot::File::create($self->{file},$info);
 #   }
-  } elsif (! $self->{pdb}) {
-    croak "Error: No port, pdb or file specified";
-  }
-  $self->reset;
-  return $self;
+
 }
 
 sub reset {
@@ -105,7 +123,7 @@ sub reset {
   my $class = ref $self || croak "Not a method call";
   $self->{index} = 0;
   $self->_read_appinfo;
-  $self->_remove_deleted_records;
+  #$self->_remove_deleted_records;
 }
 
 sub read {
@@ -115,16 +133,20 @@ sub read {
   my ($i,%attr,$found);
   if ($self->{index} < $self->{pdb}->getRecords) {
     my $record = PDA::Pilot::Address::Unpack($self->{pdb}->getRecord($self->{index}++));
+    if ($record->{deleted}) {
+      $self->{pdb}->deleteRecord($record->{id});
+      return ($self->read);
+    }
     my %labels = %{$self->_insert_phone_labels($record->{phoneLabel})};
     for ($i=0;$i<=$#{$record->{entry}};$i++) {
       if (defined $record->{entry}->[$i]) {
-	$attr{$labels{$i}} = $record->{entry}->[$i],"\n";
+	@{$attr{$labels{$i}}} = split /$self->{intra_attr_sep_char}/ ,$record->{entry}->[$i];
       }
     }
     my $entry = AddressBook::Entry->new(config=>$self->{config},
-				        db=>"PDB",
+				        db=>$self->{db_name},
 				        attr=>\%attr);
-    $entry->add(db=>"PDB",
+    $entry->add(db=>$self->{db_name},
 		attr=>{category=>$reverse_category_hash{$record->{category}}});
     if ($record->{modified}) {$entry->{timestamp} = ParseDate("Today")}
     else {$entry->{timestamp} = 0}
@@ -153,31 +175,39 @@ sub write {
   my $entry = shift;
   $entry->calculate;
   my $record = $self->{pdb}->newRecord;
-  my ($field,$i,$j,@phone_display,$phone_display,$phone_display_calc,$phone_target,$value);
+  my ($field,$i,$j,@phone_display,$phone_display,$phone_display_calc,$phone_target,$value,@phone_attrs);
   $entry->calculate;
   my %labels = %{$self->{field_labels}};
-  my $attrs = $entry->get(db=>"PDB");
+  my $attrs = $entry->get(db=>$self->{db_name});
   my $phone_index = 0;
   foreach $field (keys %{$attrs}) {
-    $value = $attrs->{$field}->{value}->[0];
+    $value = join $self->{intra_attr_sep_char}, @{$attrs->{$field}->{value}};
     if ($field eq "category") {
       if (! exists $self->{category_hash}->{$value}) {
 	$self->_add_category($value);
       }
       $record->{category}=$self->{category_hash}->{$value};
     } elsif (exists $self->{phone_labels}->{$field}) {
-      $record->{phoneLabel}->[$phone_index] = $self->{phone_labels}->{$field};
-      $record->{entry}->[$phone_index+3] = $value;
-      $phone_index++;
+      push @phone_attrs, $field;
+      next; #defer phone field processing until later
     } else {
       $record->{entry}->[$labels{$field}] = $value;
     }
+  }
+  # now process phone fields
+  foreach $field (sort {$attrs->{$a}->{meta}->{order} <=> $attrs->{$b}->{meta}->{order}} @phone_attrs) {
+    # for the time being, we will concatenate like phone fields
+    $value = join $self->{intra_attr_sep_char}, @{$attrs->{$field}->{value}};
+    $record->{phoneLabel}->[$phone_index] = $self->{phone_labels}->{$field};
+    $record->{entry}->[$phone_index+3] = $value;
+    $phone_index++;
+    if ($phone_index == 5) {last}  # there is only room for 5 "phone" fields
   }
   for ($i=0;$i<=keys %labels;$i++) {
     unless ($record->{entry}->[$i]) {$record->{entry}->[$i] = undef}
   }
   ($phone_display_calc = $self->{phone_display}) =~ s/\$([\w-]+)/\$attrs->{$1}->{value}->[0]/g;
-  eval qq{ \$phone_display = $phone_display_calc };
+  eval qq{ \$phone_display = $phone_display_calc }; warn "Syntax error in phone_display_calc: $@" if $@;
   @phone_display = split ",",$phone_display;
  find_phone: for ($i=0;$i<=$#phone_display;$i++) {
    if ($attrs->{$phone_display[$i]}->{value}->[0]) {

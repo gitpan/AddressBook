@@ -10,7 +10,7 @@ my $labook = AddressBook->new(source => "LDIF",
                               config => $habook->{config}) || die;
 
 while ($entry=$labook->read) {
-  print $habook->write($entry) || die;
+  $habook->write($entry) || die;
 }
 
 print "not " unless 1;

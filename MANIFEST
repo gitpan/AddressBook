@@ -24,4 +24,7 @@ t/t_csv
 t/t.ldif
 t/t.conf
 examples/ldap-abook.conf
+examples/phonelist.cgi
+examples/abook.palm
+examples/SyncAbook.pm
 html/index.html

@@ -45,7 +45,7 @@ use AddressBook::Config;
 
 use vars qw($VERSION @ISA);
 
-$VERSION = '0.10';
+$VERSION = '0.15';
 
 =head2 new
 	   
@@ -67,16 +67,17 @@ sub new {
     $self->{config} = AddressBook::Config->new(config_file=>$args{config_file});
   }
   if(defined $args{source}) {
-    my ($driverName, $dsn) = split(':', $args{source}, 2);
+    my ($type, $dsn) = split(':', $args{source}, 2);
     $dsn = '' unless $dsn; 
     delete $args{source};
     my (%bedb_args,$k,$v);
-    foreach ($self->{config}->{db}->{$driverName}, \%args) {
+    foreach ($self->{config}->{db}->{$type}, \%args) {
       next if (ref($_) ne "HASH" || ! %{$_} );
       while (($k,$v) = each %{$_}) {
 	$bedb_args{$k} = $v;
       }
     }
+    my $driverName = $self->{config}->{db}->{$type}->{driver} || croak "Uknown driver type for source = \"$type\"";
     eval qq{
       require AddressBook::DB::$driverName;
       \$self = AddressBook::DB::$driverName->new(dsn => "$dsn",
@@ -85,6 +86,7 @@ sub new {
 						 );
     };
     croak "Couldn't load backend `$driverName': $@" if $@;
+    $self->{db_name}=$type;
   } else {
     bless ($self,$class);
   }
@@ -94,10 +96,15 @@ sub new {
 =head2 sync
 
   AddressBook::sync(master=>$master_db, slave=>$slave_db)
+  AddressBook::sync(master=>$master_db, slave=>$slave_db,debug=>1)
 
 Synchronizes the "master" and "slave" databases.  The "master" database type must be
 one that supports random-access methods.  The "slave" database type must
 be one that supports sequential-access methods.
+
+When the 'debug' option is true, debug messages will be printed to stdout.  The 
+msg_function paramater, if included, should be a subroutine reference which will
+be called with a status message is the argument.
 
 =over 4
 
@@ -134,8 +141,8 @@ If the records do not match, then:
 
 =item Z<>
 
-If the slave record's timestamp is newer, the master's entry is updated with 
-the slave entry's data.
+If the slave record's timestamp is newer, the master's entry is merged (see below) 
+with the slave entry's data.
 
 =item Z<>
 
@@ -157,7 +164,12 @@ Each record of the master is added to the slave
 
 =back
 
-Note that deletions made on the slave database are effectively ignored during
+The 'merging' of the master and slave entries involves taking each attribute in the
+slave's entry and replacing the corresponding attribute in the master's entry.  
+Note that attributes that are deleted only on the slave are therefore effectively ignored 
+during synchronization.
+
+Similarly, deletions made on the slave database are effectively ignored during
 synchronization.
 
 =cut
@@ -170,51 +182,76 @@ sub sync {
     croak "Key fields must be defined for both master and slave backends";
   }
   $slave->reset;
-  my ($entry,$filter,$key,$count,$slave_type,@non_keys,%slave_keys,$master_entry,$flag);
+  my ($entry,$filter,$key,$count,@non_keys, $slave_entry_attrs,
+      %slave_keys,$master_entry,$flag,$master_tmp,$slave_tmp,$msg);
   foreach $key (split ',', $slave->{key_fields}) {
     $slave_keys{$key} = "";
   }
-  ($slave_type) = (ref $slave) =~ /\:\:(\w+)$/;
+  foreach (grep {! exists $slave_keys{$_}} $slave->get_attribute_names) {
+    push @non_keys, $_;
+  }
+  my (%seen, @master_only, @slave_only);
+  @seen{$slave->get_cannonical_attribute_names} = ();
+  foreach ($master->get_cannonical_attribute_names) {
+    push (@master_only,$_) unless exists $seen{$_};
+  }
+  @seen{$master->get_cannonical_attribute_names} = ();
+  foreach ($slave->get_cannonical_attribute_names) {
+    push (@slave_only,$_) unless exists $seen{$_};
+  }
   while ($entry = $slave->read) {
-    @non_keys=();
     $filter = AddressBook::Entry->new(config=>$slave->{config},
                                       attr=>$entry->{attr});
-    foreach (grep {! exists $slave_keys{$slave->{config}->{generic2db}->{$_}->{$slave_type}}} 
-	     keys %{$filter->{attr}}) {
-      push @non_keys, $slave->{config}->{generic2db}->{$_}->{$slave_type};
-    }
-    $filter->delete(db=>$slave_type,attrs=>\@non_keys);
-    $count = $master->search(filter=>$filter->{attr},strict=>1);
-    if ($args{debug}) {
-      print $filter->dump;
-      print "matched: $count\n";
-    }
+    $filter->delete(attrs=>\@non_keys,db=>$slave->{db_name});
+    $count = $master->search(filter=>$filter->{attr});
+    $msg = join "\n", $filter->dump;
+    $msg .= "matched: $count\n";
+    if ($args{debug}) {print $msg}
+    if ($args{msg_function}) {&{$args{msg_function}}($msg)}
     if ($count == 1) {
       $master_entry = $master->read;
-      if (AddressBook::Entry::compare($entry,$master_entry)) {
-	if ($args{debug}) { print "entries match\n"}
+      $master_tmp = $master_entry;
+      $master_tmp->delete(attrs=>\@master_only);
+      $slave_tmp = $entry;
+      $slave_tmp->delete(attrs=>\@slave_only);
+      if (AddressBook::Entry::compare($slave_tmp,$master_tmp)) {
+	$msg = "**entries match**\n";
+	if ($args{debug}) {print $msg}
+	if ($args{msg_function}) {&{$args{msg_function}}($msg)}
       } else {
-	if ($args{debug}) {
-	  print "slave entry timestamp: ",$entry->{timestamp},"\n";
-	  print "master entry timestamp: ",$master_entry->{timestamp},"\n";
-	}
+	$msg = "slave entry timestamp: " . $entry->{timestamp} . "\n";
+	$msg .= "master entry timestamp: " . $master_entry->{timestamp} . "\n";
+	if ($args{debug}) {print $msg}
+	if ($args{msg_function}) {&{$args{msg_function}}($msg)}
 	$flag = Date_Cmp($entry->{timestamp},$master_entry->{timestamp});
 	if ($flag < 0) {
-	  if ($args{debug}) {print "master is newer\n"}
+	  $msg = "**master is newer**\n";
+	  if ($args{debug}) {print $msg}
+	  if ($args{msg_function}) {&{$args{msg_function}}($msg)}
 	} else {
-	  if ($args{debug}) {print "slave is newer - updating master\n"}
-	  $master->update(entry=>$entry,filter=>$filter->{attr});
+	  $msg = "**slave is newer - updating master**\n";
+	  if ($args{debug}) {print $msg}
+	  if ($args{msg_function}) {&{$args{msg_function}}($msg)}
+	  $slave_entry_attrs = $entry->get(values_only=>1);
+	  $master_entry->replace(attr=>$slave_entry_attrs);
+	  $master->update(entry=>$master_entry,filter=>$filter->{attr}) || croak $master->code;
 	}
       }
     } elsif ($count == 0) {
-      if ($args{debug}) {print "Entry not found in master - adding:\n".$entry->dump."\n"}
-      $master->add($entry);
+      $msg = "**Entry not found in master - adding**:\n".$entry->dump."\n";
+      if ($args{debug}) {print $msg}
+      if ($args{msg_function}) {&{$args{msg_function}}($msg)}
+      $master->add($entry) || croak $master->code;;
     } else {croak "Error: entry matched multiple entries in master!\n"}
   }
-  if ($args{debug}) {print "Truncating slave\n"}
+  $msg = "Truncating slave\n";
+  if ($args{debug}) {print $msg}
+  if ($args{msg_function}) {&{$args{msg_function}}($msg)}
   $slave->truncate;
   $master->reset;
-  if ($args{debug}) {print "Adding master's records to slave\n"}
+  $msg = "Adding master's records to slave\n";
+  if ($args{debug}) {print $msg}
+  if ($args{msg_function}) {&{$args{msg_function}}($msg)}
   while ($entry = $master->read) {
     $slave->write($entry);
   }
@@ -315,6 +352,41 @@ sub truncate {
 
   carp "Method not implemented"
 }
+
+=head2 get_attribute_names 
+
+  @names = $abook->get_attribute_names;
+
+Returns a list of valid backend-specific attribute names
+
+=cut
+
+sub get_attribute_names {
+  my $self=shift;
+  my $class = ref $self || croak "Not a method call.";
+  my %fields = %{$self->{config}->{db2generic}->{$self->{db_name}}};
+  my @names = sort {$self->{config}->getMeta(attr=>$fields{$a})->{order} <=> $self->{config}->getMeta(attr=>$fields{$b})->{order}} keys %fields;
+  return @names;
+}
+
+1;
+
+=head2 get_cannonical_attribute_names 
+
+  @names = $abook->get_cannonical_attribute_names;
+
+Returns a list of valid cannonical attribute names
+
+=cut
+
+sub get_cannonical_attribute_names {
+  my $self=shift;
+  my $class = ref $self || croak "Not a method call.";
+  my @fields = $self->get_attribute_names;
+  my @names = map {$self->{config}->{db2generic}->{$self->{db_name}}->{$_}} @fields;
+  return @names;
+}
+
 1;
 __END__
 
@@ -324,6 +396,8 @@ Mark A. Hershberger, <mah@everybody.org>
 David L. Leigh, <dleigh@sameasiteverwas.net>
 
 =head1 SEE ALSO
+
+  The perl-abook home page at http://perl-abook.sourceforge.net
 
 L<AddressBook::Config>
 L<AddressBook::Entry>

@@ -9,12 +9,15 @@ AddressBook::DB::LDAP - Backend for AddressBook to use LDAP.
   use AddressBook;
   $a = AddressBook->new(source => "LDAP:hostname/ou=People,dc=example,dc=com",
                         username => "user", password => "pass");
+  $a->add($entry) || die $a->code;
 
 =head1 DESCRIPTION
 
+The Net::LDAP library module is required in order to use this package.
+
 AddressBook::DB::LDAP supports random access backend database methods.
 
-AddressBook::DB::LDAP behavior can be modified using the following options:
+Behavior can be modified using the following options:
 
 =over 4
 
@@ -53,7 +56,7 @@ the following:
 
 =back
 
-Any of these options can be specified in the constructor, or in the configuration file.
+Any of these options may be specified in the constructor, or in the configuration file.
 
 =cut
 
@@ -65,38 +68,20 @@ use Date::Manip;
 use Carp;
 use vars qw(@ISA $VERSION);
 
-$VERSION = '0.10';
+$VERSION = '0.13';
 
 @ISA = qw(AddressBook);
 
 =head2 new
 
-The ldap server and hostname may be specified in the constructor in 
-in one of two ways: 
-
-=over 4
-
-=item 1
-
-As part of the "source" parameter, for example:
-
+  $a = AddressBook->new(source => "LDAP");
   $a = AddressBook->new(source => "LDAP:localhost/ou=People,dc=example,dc=com");
-
-=item 2
-
-Using the "hostname" and "base" named parameters:
-
   $a = AddressBook->new(source => "LDAP",
 			hostname=>"localhost",
 			base=>"o=test"
 			);
 
-Like all AddressBook database constructor parameters, the "dsn" and "table" may 
-also be specified in the configuration file.
-
-=back
-
-Any of these options can be specified in the constructor, or in the configuration file.
+Any or all options may be specified in the constructor, or in the configuration file.
 
 =cut
 
@@ -108,15 +93,20 @@ sub new {
   foreach (keys %args) {
     $self->{$_} = $args{$_};
   }
-  my ($hostname,$base);
+  my ($hostname,$base,$mesg);
   if ($self->{dsn}) {
     ($hostname,$base) = split "/", $self->{dsn};
   }
   $self->{hostname} = $hostname || $self->{hostname};
   $self->{base} = $base || $self->{base};
-  if(defined $self->{hostname}) {
-    $self->{ldap} = Net::LDAP->new($self->{hostname}, async => 1 || croak $@);
-    $self->{ldap}->bind($self->{username}, password => $self->{password});
+  $self->{ldap} = Net::LDAP->new($self->{hostname}, async => 1 || croak $@);
+  unless ($self->{anonymous}) {
+    $mesg = $self->{ldap}->bind($self->{username}, password => $self->{password});
+  } else {
+    $mesg = $self->{ldap}->bind;
+  }
+  if ($mesg->is_error) {
+    croak "could not bind to LDAP server: " . $mesg->error;
   }
   return $self;
 }
@@ -128,25 +118,37 @@ sub search {
   my %arg = @_;
   my $max_size = $arg{entries} || 0;
   my $max_time = $arg{time} || 0;
-  my $strict = $arg{strict} || 0;
+  my $fuzzy = $arg{fuzzy} || 0;
+  if (exists $arg{strict}) {
+    warn "The 'strict' parameter to LDAP backend searches has been removed";
+  } 
   delete $arg{entries};
   delete $arg{time};
 
   if(defined $arg{filter}) {
     # We have stuff to look for;
-    my $entry = AddressBook::Entry->new(attr=>$arg{filter},
-					config => $self->{config},
-					);
-    $entry->calculate;
-    $entry = $entry->get(db=>'LDAP',values_only=>'1');
-    my ($filter,$value);
-    my $evalstring = $strict ? "=" : "~=";
-    foreach (keys %{$entry}) { 
-      $value = $entry->{$_}->[0];
-      $value =~ s/\(/\\(/g;
-      $value =~ s/\)/\\)/g;
-      $filter .= "(" . $_ . $evalstring . $value . ")";
+    if (ref($arg{filter}) ne "ARRAY") {$arg{filter} = [$arg{filter}]}
+    my $evalstring = "=";
+    my ($entry,$filter,$filter_element,$subfilter,$value);
+    foreach $filter_element (@{$arg{filter}}) {
+      $entry = AddressBook::Entry->new(attr=>$filter_element,
+				       config => $self->{config},
+				       );
+      #$entry->calculate;
+      $entry = $entry->get(db=>$self->{db_name},values_only=>'1');
+      $subfilter="";
+      foreach (keys %{$entry}) { 
+	$value = $entry->{$_}->[0];
+	$value =~ s/\(/\\(/g;
+	$value =~ s/\)/\\)/g;
+        if ($fuzzy) {
+	  $value = "*" . $value . "*";
+	}
+	$subfilter .= "(" . $_ . $evalstring . $value . ")";
+      }
+      $filter .= "(& $subfilter)";
     }
+    $filter = "(| $filter)";
     $self->{so} = $self->{ldap}->search(base => $self->{base} || '',
 				      async => 1,
 				      sizelimit => $max_size,
@@ -154,14 +156,21 @@ sub search {
 				      filter => "(&(objectclass=" .
 				      $self->{objectclass} .')' .
 				      $filter . ')');
-    croak ldap_error_text($self->{so}->code) if $self->{so}->code;
+    if ($self->{so}->code) {
+      $self->{code} = ldap_error_text($self->{so}->code); 
+      return 0;
+    }
   } else {
     # We need to return everything;
     $self->{so} = $self->{ldap}->search(base => $self->{base} || '',
 				      async => 1,
 				      filter => "objectclass=" . $self->{objectclass});
-    croak ldap_error_text($self->{so}->code) if $self->{so}->code;
+    if ($self->{so}->code) {
+      $self->{code} = ldap_error_text($self->{so}->code) ;
+      return 0;
+    }
   }
+  undef $self->{code};
   return $self->{so}->count;
 }
 
@@ -175,14 +184,17 @@ sub read {
     my $attr;
     my $ret = AddressBook::Entry->new(config=>$self->{config});
     foreach $attr ($entry->attributes) {
-      if (exists $self->{config}->{db2generic}->{'LDAP'}->{$attr}) {
-	$ret->add(db=>'LDAP',attr=>{$attr=>[$entry->get_value($attr)]});
+      if (exists $self->{config}->{db2generic}->{$self->{db_name}}->{$attr}) {
+	$ret->add(db=>$self->{db_name},attr=>{$attr=>[$entry->get_value($attr)]});
       }
     }
     $ret->{timestamp} = _get_timestamp($entry);
+    undef $self->{code};
     return $ret;
+  } else {
+    $self->{code} = ldap_error_text($self->{so}->code) ;
+    return undef;
   }
-  return undef;
 }
 
 sub _get_timestamp {
@@ -208,38 +220,51 @@ sub update {
   my $self = shift;
   my $class = ref $self || croak "Not a method call";
   my %args = @_;
-  my $count = $self->search(filter=>$args{filter},strict=>1);
+  my $count = $self->search(filter=>$args{filter});
   if ($count == 0){
-    croak "Update Error: filter did not match any entries";
+    $self->{code} = "Update Error: filter did not match any entries";
+    return 0;
   } elsif ($count > 1) {
-    croak "Update Error: filter matched multiple entries";
+    $self->{code} = "Update Error: filter matched multiple entries";
+    return 0;
   }
   my $entry = $args{entry};
   $entry->calculate;
   my $old_entry=$self->read;
-  my $dn = $self->_dn_from_entry($entry);
-  my $old_dn = $self->_dn_from_entry($old_entry);
+  my $rdn = $self->_rdn_from_entry($entry);
+  my $old_rdn = $self->_rdn_from_entry($old_entry);
   my $result;
-  if ($dn ne $old_dn) {
-    $result=$self->{ldap}->moddn($old_dn,deleteoldrdn=>1,newrdn=>$dn);
-    croak ldap_error_text($result->code) if $result->code;
+  if ($rdn ne $old_rdn) {
+    $result=$self->{ldap}->moddn("$old_rdn," . $self->{base},deleteoldrdn=>1,newrdn=>$rdn);
+    if ($result->code) {
+      $self->{code} =  ldap_error_text($result->code) ;
+      return 0;
+    }
   }
-  my %attr = %{$entry->get(db=>'LDAP',values_only=>'1')};
-  $result=$self->{ldap}->modify($dn,replace=>[%attr]);
-  croak ldap_error_text($result->code) if $result->code;
+  my %attr = %{$entry->get(db=>$self->{db_name},values_only=>'1')};
+  $result=$self->{ldap}->modify("$rdn," . $self->{base},replace=>[%attr]);
+  if ($result->code) {
+    $self->{code} =  ldap_error_text($result->code) ;
+    return 0;
+  }
+  undef $self->{code};
+  return 1;
 }
 
 sub add {
   my $self = shift;
   my $class = ref $self || croak "Not a method call";
   my $entry = shift;
-
   $entry->calculate;
-  my $dn = $self->_dn_from_entry($entry);
-  my %attr = %{$entry->get(db=>'LDAP',values_only=>'1')};
+  my $dn = $self->_rdn_from_entry($entry) . "," . $self->{base};
+  my %attr = %{$entry->get(db=>$self->{db_name},values_only=>'1')};
   $attr{objectclass} = [$self->{objectclass}];
   my $result = $self->{ldap}->add($dn, attrs => [%attr]);
-  croak ldap_error_text($result->code) if $result->code;
+  if ($result->code) {
+    $self->{code} =  ldap_error_text($result->code) ;
+    return 0;
+  }
+  undef $self->{code};
   return 1;
 }
 
@@ -254,21 +279,30 @@ sub delete {
   my $class = ref $self || croak "Not a method call.";
   my $entry=shift;
   $entry->calculate;
-  my $dn = $self->_dn_from_entry($entry);
+  my $dn = $self->_rdn_from_entry($entry) . "," . $self->{base};
   my $result = $self->{ldap}->delete($dn);
-  croak ldap_error_text($result->code) if $result->code;
+  if ($result->code) {
+    $self->{code} = ldap_error_text($result->code) ;
+    return 0;
+  }
+  undef $self->{code};
   return 1;
 }
 
-sub _dn_from_entry {
+sub code {
+  my $self = shift;
+  my $class = ref $self || croak "Not a method call.";
+  return $self->{code};
+}
+
+sub _rdn_from_entry {
   my $self = shift;
   my $class = ref $self || croak "Not a method call";
   my $entry = shift || croak "Need an entry";
   my ($dn,$dn_calculate);
-  my %attr = %{$entry->get(db=>'LDAP',values_only=>'1')};
+  my %attr = %{$entry->get(db=>$self->{db_name},values_only=>'1')};
   ($dn_calculate=$self->{dn_calculate}) =~ s/\$(\w*)/\$attr{$1}->[0]/g;
-  eval qq{\$dn = $dn_calculate};
-  $dn .= "," . $self->{base};
+  eval qq{\$dn = $dn_calculate}; warn "Syntax error in dn_calculate: $@" if $@;
   return $dn;
 }
 

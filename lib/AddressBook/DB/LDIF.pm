@@ -57,7 +57,7 @@ use Date::Manip;
 
 use vars qw($VERSION @ISA);
 
-$VERSION = '0.10';
+$VERSION = '0.13';
 
 @ISA = qw(AddressBook);
 
@@ -114,7 +114,9 @@ sub read {
   if (my $ldap_entry = $self->{ldif}->read) {
     my $ret = AddressBook::Entry->new(config=>$self->{config});
     foreach ($ldap_entry->attributes) {
-      $ret->add(db=>'LDIF',attr=>{$_=>[$ldap_entry->get_value($_)]});
+      if (exists $self->{config}->{db2generic}->{$self->{db_name}}->{$_}) {
+	$ret->add(db=>$self->{db_name},attr=>{$_=>[$ldap_entry->get_value($_)]});
+      }
     }
     $ret->{timestamp} = $self->_get_timestamp;
     return $ret;
@@ -131,7 +133,7 @@ sub write {
   my $entry = shift;
   $entry->calculate;
   my $dn = $self->_dn_from_entry($entry);
-  my %attr = %{$entry->get(db=>'LDIF',values_only=>'1')};
+  my %attr = %{$entry->get(db=>$self->{db_name},values_only=>'1')};
   $attr{objectclass} = [$self->{objectclass}];
   my $ldap_entry = Net::LDAP::Entry->new();
   $ldap_entry->dn($dn);
@@ -144,9 +146,9 @@ sub _dn_from_entry {
   my $class = ref $self || croak "Not a method call";
   my $entry = shift || croak "Need an entry";
   my ($dn,$dn_calculate);
-  my %attr = %{$entry->get(db=>'LDIF',values_only=>'1')};
+  my %attr = %{$entry->get(db=>$self->{db_name},values_only=>'1')};
   ($dn_calculate=$self->{dn_calculate}) =~ s/\$(\w*)/\$attr{$1}->[0]/g;
-  eval qq{\$dn = $dn_calculate};
+  eval qq{\$dn = $dn_calculate}; warn "Syntax error in dn_calculate: $@" if $@;
   $dn .= "," . $self->{base};
   return $dn;
 }

@@ -34,7 +34,10 @@ Configuration is read from an XML configuration file which follows this DTD:
 
     <!ATTLIST field 	name 		CDATA 	#REQUIRED
                   	order 		CDATA 	#IMPLIED
-                  	type 		CDATA 	#IMPLIED
+                  	type 		(text|textblock|phone|email|url|lurl|boolean) #IMPLIED
+                  	values 		CDATA 	#IMPLIED
+                  	non_multiple 	CDATA 	#IMPLIED
+                  	read_only 	CDATA 	#IMPLIED
                   	calculate 	CDATA 	#IMPLIED
                   	calc_order 	CDATA 	#IMPLIED>
 
@@ -62,7 +65,11 @@ Configuration is read from an XML configuration file which follows this DTD:
                      	table 		CDATA 	#IMPLIED
 			dsn             CDATA   #IMPLIED>
 
-    <!ATTLIST PDB       key_fields 	CDATA 	#IMPLIED
+    <!ATTLIST PDB       write_format 	CDATA 	#IMPLIED
+			intra_attr_sep  CDATA   #IMPLIED
+                     	form_format 	CDATA 	#IMPLIED>
+
+    <!ATTLIST HTML      key_fields 	CDATA 	#IMPLIED
 			filename        CDATA   #IMPLIED
                      	phone_display 	CDATA 	#IMPLIED>
   ]>
@@ -89,7 +96,7 @@ For example,
       <LDAP objectclass="inetOrgPerson"
             base="o=abook"
             dn_calculate="'cn='.$cn"
-            username="cn=Manager,o=test"
+            username="cn=Manager,o=abook"
             password="secret"
             key_fields="cn"
       />
@@ -109,8 +116,45 @@ specific backends
 "fullname" is a calculated attribute.  Calculation strings may reference the 
 names of other attributes by "$<attr_name>".
 
+Backend databases may also be named and then tied to a source type by using the 'driver'
+attribute.  This technique is useful for defining multiple backends of the same type.  
+For example,
+
+  <AddressBook_config>
+    <fields>
+      <field name="firstname" >
+        <db type="ldap_server_1" name="givenname" />
+        <db type="ldap_server_2" name="givenname" />
+      </field>
+      <field name="lastname" >
+        <db type="ldap_server_1" name="sn" />
+        <db type="ldap_server_2" name="sn" />
+      </field>
+    </fields>
+    <databases>
+      <ldap_server_1 driver="LDAP"
+                     hostname="server_1"
+                     objectclass="inetOrgPerson"
+                     base="o=abook"
+                     dn_calculate="'cn='.$cn"
+                     username="cn=Manager,o=abook"
+                     password="secret"
+                     key_fields="cn"
+      />
+      <ldap_server_2 driver="LDAP"
+                     hostname="server_2"
+                     objectclass="inetOrgPerson"
+                     base="o=abook"
+                     dn_calculate="'cn='.$cn"
+                     username="cn=Manager,o=abook"
+                     password="secret"
+                     key_fields="cn"
+      />
+    </databases>
+  </AddressBook_config>
+
 See the various backend man pages for information on the <database> configuration
-attributes. 
+attributes.  See also the sample configuration files in the 'examples' directory.
 
 =cut
 
@@ -121,7 +165,7 @@ use XML::DOM;
 
 use vars qw($VERSION);
 
-$VERSION = '0.11';
+$VERSION = '0.13';
 
 $AddressBook::Config::config_file = "/etc/AddressBook.conf";
 
@@ -138,29 +182,22 @@ sub new {
     $config = $parser->parsefile($self->{config_file});
   };
   if ($@ || ! $config) {
-    $self->configError("Error reading config file");
+    $self->configError("Error reading config file: $@");
   }
   foreach $field ($config->getElementsByTagName("field")){
     $field_name=$field->getAttribute("name");
     foreach $attr ($field->getAttributes->getValues) {
       $self->{meta}->{$field_name}->{$attr->getName} = $attr->getValue;
     }
-    foreach $select ($field->getElementsByTagName("select")) {
-      foreach $attr ($select->getAttributes->getValues) {
-	$self->{meta}->{$field_name}->{$attr->getName} = $attr->getValue;
-      }
-      foreach $option ($select->getElementsByTagName("option")) {
-	$value=$option->getAttribute("value");
-	push @{$self->{meta}->{$field_name}->{options}},$value;
-      }
-    }
     foreach $db ($field->getElementsByTagName("db")) {
       $db_type=$db->getAttribute("type");
       $db_field_name=$db->getAttribute("name");
       $self->{generic2db}->{$field_name}->{$db_type} = $db_field_name;
       $self->{db2generic}->{$db_type}->{$db_field_name} = $field_name;
-      foreach $attr (grep {$_ ne "type" && $_ ne "name"} $db->getAttributes->getValues) {
-	$self->{dbmeta}->{$db_type}->{$field_name}->{$attr->getName} = $attr->getValue;
+      foreach $attr ($db->getAttributes->getValues) {
+	if ($attr->getName !~ /^type|name$/) {
+	  $self->{dbmeta}->{$db_type}->{$field_name}->{$attr->getName} = $attr->getValue;
+	}
       }
     }
   }
@@ -172,6 +209,11 @@ sub new {
       foreach $attr ($db->getAttributes->getValues) {
 	$self->{db}->{$db_name}->{$attr->getName} = $attr->getValue;
       }
+    }
+  }
+  foreach (keys %{$self->{db2generic}}) {
+    if (! exists $self->{db}->{$_}->{driver}) {
+      $self->{db}->{$_}->{driver} = $_;
     }
   }
   $self->validate();
@@ -199,6 +241,31 @@ sub configError {
   croak "Configuration File Error (".$self->{config_file}."):\n$msg\n";
 }
 #----------------------------------------------------------------
+
+=head2 getMeta
+  
+  %meta = %{$config->getMeta(attr=>$attr)}
+  %meta = %{$config->getMeta(attr=>$attr,db=>$db)}
+
+Returns an attribute metadata hash
+
+=cut
+
+sub getMeta {
+  my $self = shift;
+  my $class = ref $self || croak "Not a method call.";
+  my %args = @_;
+  my %ret;
+  if (exists $args{attr} && exists $self->{meta}->{$args{attr}}) {
+    %ret = %{$self->{meta}->{$args{attr}}};
+  }
+  if ($args{db}) {
+    foreach (keys %{$self->{dbmeta}->{$args{db}}->{$args{attr}}}) {
+      $ret{$_} = $self->{dbmeta}->{$args{db}}->{$args{attr}}->{$_};
+    }
+  }
+  return \%ret;
+}
 
 1;
 __END__

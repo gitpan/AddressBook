@@ -36,9 +36,6 @@ Each of the following pairs of commands will give the same result:
                                    givenname => John
                                         });
 
-  $attr_ref = $entry->get(attr=>firstname)
-  $attr_ref = $entry->get(attr=>givenname,db=>LDAP)
-
   $entry->add(attr=>{lastname=>Doe,firstname=>John})
   $entry->add(attr=>{sn=Doe,givenname=John},db=>LDAP)
 
@@ -75,7 +72,7 @@ use Carp;
 
 use vars qw($VERSION);
 
-$VERSION = '0.10';
+$VERSION = '0.12';
 
 =head2 new
 
@@ -121,9 +118,8 @@ sub new {
   } else {
     $self->{config} = AddressBook::Config->new(config_file=>$args{config_file});
   }
-  $self->{db} = $args{db};
   if ($args{attr}) {
-    $self->add(attr=>$args{attr},db=>$self->{db});
+    $self->add(attr=>$args{attr},db=>$args{db});
   }
   return $self;
 }
@@ -259,9 +255,9 @@ sub delete {
 
 =head2 get
 
-    $attr_ref = $entry->get(attrs=>\@attr);
-    $attr_ref = $entry->get(attrs=>\@attr,values_only=>1);
-    $attr_ref = $entry->get(attrs=>\@attr,db=>$db);
+    $attr_ref = $entry->get();
+    $attr_ref = $entry->get(db=>$db);
+    $attr_ref = $entry->get(db=>$db,values_only=>1);
 
 Get attributes from the Entry.  Returns a hash with cannonical attribute names as keys.
 
@@ -273,10 +269,6 @@ Unless "values_only" is specified, each value in the result is a hash with a "va
 key pointing to the attribute value array, and a "meta" key pointing to the 
 attribute metadata hash.  If "values_only" is specified, each value in the result
 points to the attribute value array.
-
-=item @attrs
-
-Required array containing the attributes to delete from the entry.
 
 =item $db
 
@@ -303,13 +295,7 @@ sub get {
       $ret->{$key}=$self->{attr}->{$_};
     } else {
       $ret->{$key}->{value}=$self->{attr}->{$_};
-      $ret->{$key}->{meta} = $self->{config}->{meta}->{$_};
-      if ($args{db}) {
-	foreach $meta (keys %{$self->{config}->{dbmeta}->{$args{db}}->{$_}}) {
-	  $ret->{$key}->{meta}->{$meta} = 
-	      $self->{config}->{dbmeta}->{$args{db}}->{$_}->{$meta};
-	}
-      }
+      %{$ret->{$key}->{meta}} = %{$self->{config}->getMeta(attr=>$_,db=>$args{db})};
     }
   }
   return $ret->{$args{attr}} if defined $args{attr};
@@ -328,14 +314,23 @@ by the calc_order attribute metadata value.
 sub calculate {
   my $self = shift;
   my $class = ref $self || croak "Not a method call";
-  my ($calculate,$result);
+  my ($calculate,$result,$attr,$i);
   foreach (sort {$self->{config}->{meta}->{$a}->{calc_order} <=> 
 		     $self->{config}->{meta}->{$b}->{calc_order}}
 	   grep {defined $self->{config}->{meta}->{$_}->{calculate}} 
 	   keys %{$self->{config}->{meta}}) {
-    ($calculate=$self->{config}->{meta}->{$_}->{calculate}) =~ s/\$(\w+)/\$self->{attr}->{$1}->[0]/g;
-    eval qq{(\$result) = $calculate};
-    $self->{attr}->{$_} = [$result];
+    $calculate=$self->{config}->{meta}->{$_}->{calculate};
+    foreach $attr (keys %{$self->{config}->{generic2db}}) {
+      $calculate =~ s/\$$attr/\$self->{attr}->{$attr}/g;
+    }
+    eval qq{(\$result) = $calculate}; croak "Error in attribute calculation for \"$_\": $@" if $@;
+    if (! ref $result) {
+      $self->{attr}->{$_}->[0] = $result;
+    } elsif (ref $result eq "ARRAY") {
+      @{$self->{attr}->{$_}} = @{$result};
+    } else {
+      croak "Error in attribute calculation for \"$_\": result must be a scalar or arrayref\n";
+    }
   }
   foreach (keys %{$self->{attr}}) {
     delete $self->{attr}->{$_} unless (defined $self->{attr}->{$_}->[0]);
@@ -368,9 +363,72 @@ sub _compare_oneway {
 	}
       }
       return undef if ($#{$entry1->{attr}->{$key}} != $#{$entry2->{attr}->{$key}});
+    } else {
+      return undef;
     }
   }
   return 1;
+}
+
+=head2 fill
+
+  $entry->fill(db=>$db);
+  $entry->fill(db=>$db,defaults=>1);
+
+Ensures that the Entry includes all attributes for a specific backend database.
+New attributes are added with null values.  If the "defaults" parameter is specified,
+new attributes are added with values as specified by the attribute "default" metadata
+specified in the config file.
+
+=cut
+
+sub fill {
+  my $self = shift;
+  my $class = ref $self || croak "Not a method call";
+  my %args = @_;
+  unless ($args{db}) {croak "database type not specified in AddressBook::Entry::fill"}
+  my (%add_hash,$value,$meta);
+  foreach (values %{$self->{config}->{db2generic}->{$args{db}}}) {
+    unless (exists $self->{attr}->{$_}) {
+      if ($args{defaults}) {
+	$meta = $self->{config}->getMeta(attr=>$_,db=>$args{db});
+	$value = $meta->{default} || '';
+      } else {
+	$value = "";
+      }
+      $add_hash{$_} = $value;
+    }
+  }
+  $self->add(attr=>\%add_hash);
+}
+
+=head2 chop
+
+  $entry->chop
+
+Removes null valued attributes from an Entry.
+
+=cut
+
+sub chop {
+  my $self = shift;
+  my $class = ref $self || croak "Not a method call";
+  my (@delete_list,@list,$key,$found,$i);
+  foreach $key (keys %{$self->{attr}}) {
+    $found = 0;
+    @list=();
+    for ($i=0;$i<=$#{$self->{attr}->{$key}};$i++) {
+      if ($self->{attr}->{$key}->[$i] ne "") {
+	$found=1;
+	push @list,$self->{attr}->{$key}->[$i];
+      }
+    }
+    @{$self->{attr}->{$key}} = @list;
+    if (! $found) {
+      push @delete_list, $key;
+    }
+  }
+  $self->delete(attrs=>\@delete_list);
 }
 
 =head2 dump

@@ -1,5 +1,43 @@
 Revision history for Perl extension AddressBook.
 
+0.15  1/22/2001	
+    - Added "anonymous" parameter to LDAP constructor to support anonymous binds.
+	
+0.14  1/18/2001	
+    - Added support for 'url', 'lurl', and 'textblock' attribute types
+    - Object persistance fix for SyncAbook.pm
+    - Missing example files added to MANIFEST
+	
+0.13  1/14/2001	
+
+    - Added phonelist.cgi sample script
+    - Added abook.palm (direct) and SyncAbook.pm (for PilotManager) sample scripts
+    - Configuration file now supports defining multiple backends of the same type (a.k.a.
+      "backend aliasing").  The 'driver' attribute determines the backend type.
+    - LDAP searches are now "strict" by default.  The "fuzzy" parameter can be used
+      for approximate matching.
+    - Sync changes
+      - Before comparing entries, attributes that exist in one database 
+	but not the other are deleted from both the master's and the slave's entries.
+      - Because records in the slave may contain less information than those in the master,
+	it is necessary to 'merge' entries when the slave's entry is newer (rather than 
+	simply overwriting the master's entry as was done previously).  One side effect
+	of this is that attributes deleted on slave entries will reappear unless they are
+	deleted on the master.  This is similar to the way that records deleted on
+	the slave will also reappear unless they are deleted on the master.
+    - PDB backend changes:
+      - phone label overrun fix
+      - now handles multi-valued attributes
+      - now removes deleted records 'on the fly'.
+    
+0.12  12/27/2000
+
+    - Major changes to HTML backend
+    - added AddressBook::Entry->fill and AddressBook::Entry->chop methods
+    - added AddressBook::Config->getMeta method
+    - various changes to support multi-valued attributes
+    - calculated attribute config changes
+	
 0.11  12/05/2000
 
     - "databases" section of config file now contains tags named for each

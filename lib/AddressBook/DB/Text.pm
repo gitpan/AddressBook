@@ -26,7 +26,7 @@ use vars qw($VERSION @ISA);
 
 @ISA = qw(AddressBook);
 
-$VERSION = '0.10';
+$VERSION = '0.13';
 
 =head2 new
 
@@ -70,7 +70,7 @@ sub write {
 
   $self->{fh}->seek(0,2); # jump to the end of the file
   $self->{mode} = "w";
-  my $attr = $entry->get(db=>'Text');
+  my $attr = $entry->get(db=>$self->{db_name});
   my @ar;
   while(defined(my $k = each %{$attr})) {
     my $data = join(", ", @{$attr->{$k}->{value}});
