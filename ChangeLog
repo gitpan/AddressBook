@@ -1,5 +1,8 @@
 Revision history for Perl extension AddressBook.
 
+0.16  2/02/2001
+    - Makefile.PL now builds a config file for the LDAP backend test script.	 
+
 0.15  1/22/2001	
     - Added "anonymous" parameter to LDAP constructor to support anonymous binds.
 	

@@ -45,7 +45,7 @@ use AddressBook::Config;
 
 use vars qw($VERSION @ISA);
 
-$VERSION = '0.15';
+$VERSION = '0.16';
 
 =head2 new
 	   

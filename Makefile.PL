@@ -1,4 +1,4 @@
-use ExtUtils::MakeMaker;
+use ExtUtils::MakeMaker qw(prompt WriteMakefile);
 
 #--- Check for required modules ---
 
@@ -65,6 +65,39 @@ modules from http://www.perl.com/CPAN
 EDQ
 
 exit unless $reqs_found;
+
+$r = prompt("For testing the LDAP backend, I need to know some things about 
+your LDAP server.  Continue? [y/n]","y");
+
+if ($r =~ /^y$/i) {
+  $hostname = prompt("What is your LDAP server hostname","localhost");
+  $base = prompt("What is a valid LDAP base that I can use for searching? 
+(eg. \"ou=abook,dc=<your_domain>\")");
+  $objectclass = prompt("What is a valid LDAP objectclass that I can search for?",
+"organizationalUnit");
+  print "The LDAP test script will attempt to bind anonymously to \"$hostname\"
+and search for \"objectclass=$objectclass\" 
+using the base: $base\n";
+  open F, ">t/t.ldap.conf";
+  print F << "EDQ";
+<AddressBook_config>
+  <fields>
+    <field name="objectclass">
+      <db type="LDAP" name="objectclass" />
+    </field>
+  </fields>
+  <databases>
+    <LDAP
+      hostname = "$hostname"
+      base = "$base"
+      anonymous = "1"
+      objectclass = "$objectclass"
+    />
+  </databases>
+</AddressBook_config>
+EDQ
+  close F;
+}
 
 WriteMakefile(
     'NAME'	=> 'AddressBook',

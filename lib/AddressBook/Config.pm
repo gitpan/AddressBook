@@ -178,7 +178,9 @@ sub new {
   my ($parser,$config,$field,$field_name,$attr,$db_type,$db_field_name,$db,$select,$option,$value);
   $self->{config_file} = $args{config_file} || $AddressBook::Config::config_file;
   eval {
-    $parser = XML::DOM::Parser->new(ErrorContext=>1,ParseParamEnt=>1);
+    $parser = XML::DOM::Parser->new(ErrorContext=>1,
+				    ParseParamEnt=>1,
+				    ProtocolEncoding=>'UTF-8');
     $config = $parser->parsefile($self->{config_file});
   };
   if ($@ || ! $config) {
